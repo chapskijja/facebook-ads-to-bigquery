@@ -2,6 +2,8 @@
 
 This project provides a robust data connector that fetches Facebook Ads data and loads it into Google BigQuery. It automates the process of retrieving detailed ad performance metrics and storing them in a structured, queryable format for further analysis.
 
+![Facebook Ads to BigQuery](https://i.owox.ua/pages/articles/51/51864.svg)
+
 ## Features
 
 - Fetches Facebook Ads data using the Facebook Business API

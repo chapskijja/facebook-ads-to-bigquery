@@ -25,8 +25,8 @@ def run_daily_sync():
     # Create table if needed
     create_table_if_not_exists()
     
-    # Get existing dates
-    existing_dates = get_existing_dates()
+    # Get existing dates (only last N days for efficiency)
+    existing_dates = get_existing_dates(ETLConfig.MONITORING_WINDOW_DAYS)
     
     # Use default date range
     start_date, end_date = ETLConfig.get_default_date_range()
@@ -38,7 +38,8 @@ def run_daily_sync():
         start_date=start_date,
         end_date=end_date,
         existing_dates=existing_dates,
-        rewrite_last_n_days=ETLConfig.REWRITE_LAST_N_DAYS
+        rewrite_last_n_days=ETLConfig.REWRITE_LAST_N_DAYS,
+        monitoring_window_days=ETLConfig.MONITORING_WINDOW_DAYS
     )
     
     if not date_ranges:
@@ -58,8 +59,8 @@ def run_backfill(days_back=365):
     # Create table if needed
     create_table_if_not_exists()
     
-    # Get existing dates
-    existing_dates = get_existing_dates()
+    # Get existing dates (only last N days for efficiency)
+    existing_dates = get_existing_dates(ETLConfig.MONITORING_WINDOW_DAYS)
     
     # Get backfill date range
     start_date, end_date = ETLConfig.get_backfill_date_range(days_back)
@@ -71,7 +72,8 @@ def run_backfill(days_back=365):
         start_date=start_date,
         end_date=end_date,
         existing_dates=existing_dates,
-        rewrite_last_n_days=0  # No rewrite for backfill
+        rewrite_last_n_days=0,  # No rewrite for backfill
+        monitoring_window_days=ETLConfig.MONITORING_WINDOW_DAYS
     )
     
     if not date_ranges:
@@ -130,13 +132,14 @@ def run_custom_range(start_date_str, end_date_str, force_rewrite=False):
             current_start = chunk_end + timedelta(days=1)
     else:
         # Get existing dates and find missing ranges
-        existing_dates = get_existing_dates()
+        existing_dates = get_existing_dates(ETLConfig.MONITORING_WINDOW_DAYS)
         
         date_ranges = get_date_ranges_to_fetch(
             start_date=start_date,
             end_date=end_date,
             existing_dates=existing_dates,
-            rewrite_last_n_days=0
+            rewrite_last_n_days=0,
+            monitoring_window_days=ETLConfig.MONITORING_WINDOW_DAYS
         )
         
         if not date_ranges:
@@ -182,22 +185,28 @@ def show_status():
             print(f"Total Impressions: {row.total_impressions:,}")
             print(f"Total Clicks: {row.total_clicks:,}")
         
-        # Check for missing dates in recent 30 days
+        # Check for missing dates in recent monitoring window
         end_date = datetime.now().date() - timedelta(days=1)
-        start_date = end_date - timedelta(days=30)
+        start_date = end_date - timedelta(days=ETLConfig.MONITORING_WINDOW_DAYS)
         
-        existing_dates = get_existing_dates()
-        date_ranges = get_date_ranges_to_fetch(start_date, end_date, existing_dates, 0)
+        existing_dates = get_existing_dates(ETLConfig.MONITORING_WINDOW_DAYS)
+        date_ranges = get_date_ranges_to_fetch(
+            start_date, 
+            end_date, 
+            existing_dates, 
+            rewrite_last_n_days=0,
+            monitoring_window_days=ETLConfig.MONITORING_WINDOW_DAYS
+        )
         
         if date_ranges:
-            print(f"\n⚠️  Missing dates in last 30 days:")
+            print(f"\n⚠️  Missing dates in last {ETLConfig.MONITORING_WINDOW_DAYS} days:")
             for range_start, range_end in date_ranges:
                 if range_start == range_end:
                     print(f"  - {range_start}")
                 else:
                     print(f"  - {range_start} to {range_end}")
         else:
-            print(f"\n✅ No missing dates in last 30 days")
+            print(f"\n✅ No missing dates in last {ETLConfig.MONITORING_WINDOW_DAYS} days")
             
     except Exception as e:
         print(f"❌ Error getting status: {e}")

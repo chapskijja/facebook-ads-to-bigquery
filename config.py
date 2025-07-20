@@ -12,10 +12,11 @@ class ETLConfig:
     # Date range settings
     DEFAULT_LOOKBACK_DAYS = 30  # How many days back to check by default
     REWRITE_LAST_N_DAYS = 1     # Rewrite last N days to ensure complete data
+    MONITORING_WINDOW_DAYS = 10 # Only monitor last N dates in BigQuery for efficiency
     
     # API and processing settings
     MAX_CHUNK_DAYS = 30         # Maximum days per Facebook API request
-    RATE_LIMIT_DELAY = 3        # Seconds between API calls
+    RATE_LIMIT_DELAY = 30        # Seconds between API calls
     
     # Facebook API settings
     API_VERSION = 'v17.0'

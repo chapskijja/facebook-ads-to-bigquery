@@ -87,78 +87,149 @@ def create_table_if_not_exists():
         client.create_table(table)
         print(f"Created table {dataset_id}.{table_id}")
 
-def get_existing_dates() -> Set[datetime.date]:
-    """Get all existing dates in BigQuery table"""
+def get_existing_dates(last_n_days=10) -> Set[datetime.date]:
+    """Get the last N dates from BigQuery table for efficiency"""
     query = f"""
     SELECT DISTINCT date
     FROM `{dataset_id}.{table_id}`
     ORDER BY date DESC
-    LIMIT 30
+    LIMIT {last_n_days}
     """
     
     try:
         results = client.query(query)
         existing_dates = {row.date for row in results}
-        print(f"Found {len(existing_dates)} existing dates in BigQuery")
+        print(f"Found {len(existing_dates)} recent dates in BigQuery (last {last_n_days} days)")
         if existing_dates:
             min_date = min(existing_dates)
             max_date = max(existing_dates)
-            print(f"Date range: {min_date} to {max_date}")
+            print(f"Recent date range: {min_date} to {max_date}")
         return existing_dates
     except Exception as e:
         print(f"Error querying existing dates (table might not exist): {e}")
         return set()
 
+def get_latest_date_in_bq() -> datetime.date:
+    """Get the most recent date in BigQuery table"""
+    query = f"""
+    SELECT MAX(date) as max_date
+    FROM `{dataset_id}.{table_id}`
+    """
+    
+    try:
+        results = client.query(query)
+        for row in results:
+            if row.max_date:
+                print(f"Latest date in BigQuery: {row.max_date}")
+                return row.max_date
+        return None
+    except Exception as e:
+        print(f"Error getting latest date: {e}")
+        return None
+
 def get_date_ranges_to_fetch(start_date: datetime.date, end_date: datetime.date, 
                            existing_dates: Set[datetime.date], 
-                           rewrite_last_n_days: int = 0) -> List[tuple]:
+                           rewrite_last_n_days: int = 0,
+                           monitoring_window_days: int = 10) -> List[tuple]:
     """
-    Determine which date ranges need to be fetched
-    Returns list of (start_date, end_date) tuples
+    Smart date range fetching focused on recent data integrity
+    
+    Logic:
+    1. Find latest date in BigQuery  
+    2. Focus on monitoring window (last N days from latest date)
+    3. Rewrite latest date + fill any gaps in monitoring window
+    4. If latest date is old, fill gap from latest to yesterday
     """
-    print(f"\n=== Date Range Analysis ===")
+    print(f"\n=== Smart Date Range Analysis ===")
     print(f"Requested range: {start_date} to {end_date}")
+    print(f"Monitoring window: {monitoring_window_days} days")
     
-    # Calculate which dates we need
-    all_dates = set()
-    current_date = start_date
-    while current_date <= end_date:
-        all_dates.add(current_date)
-        current_date += timedelta(days=1)
+    # Get the latest date from BigQuery
+    latest_date_in_bq = get_latest_date_in_bq()
+    yesterday = datetime.now().date() - timedelta(days=1)
     
-    # Remove existing dates (except last N days if rewrite is enabled)
-    if rewrite_last_n_days > 0 and existing_dates:
-        latest_existing = max(existing_dates)
-        rewrite_from_date = latest_existing - timedelta(days=rewrite_last_n_days - 1)
+    if not latest_date_in_bq:
+        print("No existing data found - will fetch entire requested range")
+        return [(start_date, end_date)]
+    
+    # Calculate monitoring window
+    monitoring_start = latest_date_in_bq - timedelta(days=monitoring_window_days - 1)
+    
+    print(f"Latest date in BQ: {latest_date_in_bq}")
+    print(f"Yesterday: {yesterday}")
+    print(f"Monitoring window: {monitoring_start} to {latest_date_in_bq}")
+    
+    # Determine what we need to fetch
+    dates_to_fetch = set()
+    
+    # Always rewrite the latest date for completeness
+    if rewrite_last_n_days > 0 and latest_date_in_bq:
+        rewrite_from = max(
+            latest_date_in_bq - timedelta(days=rewrite_last_n_days - 1),
+            start_date
+        )
+        rewrite_to = min(latest_date_in_bq, end_date)
         
-        # Remove dates to rewrite from existing_dates set
-        dates_to_rewrite = {d for d in existing_dates if d >= rewrite_from_date}
-        existing_dates_filtered = existing_dates - dates_to_rewrite
+        print(f"Will rewrite last {rewrite_last_n_days} day(s): {rewrite_from} to {rewrite_to}")
         
-        print(f"Will rewrite last {rewrite_last_n_days} days from {rewrite_from_date}")
-        print(f"Dates to rewrite: {sorted(dates_to_rewrite)}")
-    else:
-        existing_dates_filtered = existing_dates
+        current = rewrite_from
+        while current <= rewrite_to:
+            dates_to_fetch.add(current)
+            current += timedelta(days=1)
     
-    missing_dates = all_dates - existing_dates_filtered
+    # Check for gaps in monitoring window
+    current = max(monitoring_start, start_date)
+    monitoring_end = min(latest_date_in_bq, end_date)
     
-    if not missing_dates:
+    gaps_in_monitoring = []
+    while current <= monitoring_end:
+        if current not in existing_dates:
+            gaps_in_monitoring.append(current)
+            dates_to_fetch.add(current)
+        current += timedelta(days=1)
+    
+    if gaps_in_monitoring:
+        print(f"Found {len(gaps_in_monitoring)} gaps in monitoring window: {gaps_in_monitoring}")
+    
+    # Add missing dates from latest_date + 1 to yesterday
+    if latest_date_in_bq < yesterday:
+        gap_start = latest_date_in_bq + timedelta(days=1)
+        gap_end = min(yesterday, end_date)
+        
+        print(f"Gap from latest to yesterday: {gap_start} to {gap_end}")
+        
+        current = gap_start
+        while current <= gap_end:
+            dates_to_fetch.add(current)
+            current += timedelta(days=1)
+    
+    # Also include any requested dates beyond our latest date
+    if end_date > latest_date_in_bq:
+        future_start = max(latest_date_in_bq + timedelta(days=1), start_date)
+        future_end = end_date
+        
+        current = future_start
+        while current <= future_end:
+            dates_to_fetch.add(current)
+            current += timedelta(days=1)
+    
+    if not dates_to_fetch:
         print("No missing dates found!")
         return []
     
-    missing_dates_sorted = sorted(missing_dates)
-    print(f"Missing dates: {len(missing_dates)} total")
-    print(f"First missing: {missing_dates_sorted[0]}")
-    print(f"Last missing: {missing_dates_sorted[-1]}")
+    # Convert to sorted list and group into consecutive ranges
+    dates_sorted = sorted(dates_to_fetch)
+    print(f"Total dates to fetch: {len(dates_sorted)}")
+    print(f"Date range: {dates_sorted[0]} to {dates_sorted[-1]}")
     
     # Group consecutive dates into ranges
     ranges = []
-    if missing_dates_sorted:
-        range_start = missing_dates_sorted[0]
-        range_end = missing_dates_sorted[0]
+    if dates_sorted:
+        range_start = dates_sorted[0]
+        range_end = dates_sorted[0]
         
-        for i in range(1, len(missing_dates_sorted)):
-            current_date = missing_dates_sorted[i]
+        for i in range(1, len(dates_sorted)):
+            current_date = dates_sorted[i]
             if current_date == range_end + timedelta(days=1):
                 # Consecutive date, extend current range
                 range_end = current_date
@@ -171,7 +242,7 @@ def get_date_ranges_to_fetch(start_date: datetime.date, end_date: datetime.date,
         # Add the last range
         ranges.append((range_start, range_end))
     
-    print(f"Date ranges to fetch: {len(ranges)}")
+    print(f"Optimized into {len(ranges)} range(s):")
     for i, (start, end) in enumerate(ranges, 1):
         days = (end - start).days + 1
         print(f"  Range {i}: {start} to {end} ({days} days)")
@@ -304,7 +375,8 @@ def main():
         start_date=start_date,
         end_date=end_date,
         existing_dates=existing_dates,
-        rewrite_last_n_days=ETLConfig.REWRITE_LAST_N_DAYS
+        rewrite_last_n_days=ETLConfig.REWRITE_LAST_N_DAYS,
+        monitoring_window_days=ETLConfig.MONITORING_WINDOW_DAYS
     )
     
     if not date_ranges:

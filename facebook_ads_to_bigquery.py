@@ -120,7 +120,6 @@ def get_latest_date_in_bq() -> datetime.date:
         results = client.query(query)
         for row in results:
             if row.max_date:
-                print(f"Latest date in BigQuery: {row.max_date}")
                 return row.max_date
         return None
     except Exception as e:

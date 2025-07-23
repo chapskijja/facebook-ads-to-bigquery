@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  facebook-ads-etl:
+    build: .
+    container_name: facebook-ads-to-bigquery
+    volumes:
+      # Mount your .env file
+      - ./.env:/app/.env
+      # Mount your Google Cloud credentials
+      - ./secret:/app/secret
+      # Optional: mount logs directory
+      - ./logs:/app/logs
+    environment:
+      # Override these in .env file
+      - PYTHONUNBUFFERED=1
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/secret/your-service-account.json
+    command: ["python", "run_etl.py", "daily"]
+    restart: "no"
+
+  # Service for backfill (run once)
+  facebook-ads-backfill:
+    build: .
+    container_name: facebook-ads-backfill
+    volumes:
+      - ./.env:/app/.env
+      - ./secret:/app/secret
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/secret/your-service-account.json
+    command: ["python", "run_etl.py", "backfill", "--days", "365"]
+    restart: "no"
+    profiles: ["backfill"]  # Only run when explicitly specified 

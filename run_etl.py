@@ -12,7 +12,9 @@ from config import ETLConfig
 from facebook_ads_to_bigquery import (
     create_table_if_not_exists,
     get_existing_dates,
+    get_existing_dates_in_range,
     get_date_ranges_to_fetch,
+    get_missing_date_ranges_for_backfill,
     fetch_and_load_data,
     client,
     account
@@ -59,21 +61,19 @@ def run_backfill(days_back=365):
     # Create table if needed
     create_table_if_not_exists()
     
-    # Get existing dates (only last N days for efficiency)
-    existing_dates = get_existing_dates(ETLConfig.MONITORING_WINDOW_DAYS)
-    
     # Get backfill date range
     start_date, end_date = ETLConfig.get_backfill_date_range(days_back)
     
     print(f"Backfill date range: {start_date} to {end_date}")
     
-    # Get missing date ranges (no rewrite for backfill)
-    date_ranges = get_date_ranges_to_fetch(
+    # Get existing dates in the full backfill range (not just last 10 days!)
+    existing_dates = get_existing_dates_in_range(start_date, end_date)
+    
+    # Get missing date ranges using simple backfill logic
+    date_ranges = get_missing_date_ranges_for_backfill(
         start_date=start_date,
         end_date=end_date,
-        existing_dates=existing_dates,
-        rewrite_last_n_days=0,  # No rewrite for backfill
-        monitoring_window_days=ETLConfig.MONITORING_WINDOW_DAYS
+        existing_dates=existing_dates
     )
     
     if not date_ranges:

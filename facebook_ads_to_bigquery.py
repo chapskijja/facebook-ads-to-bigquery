@@ -1,3 +1,4 @@
+import signal
 from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.adsinsights import AdsInsights
@@ -11,6 +12,13 @@ from config import ETLConfig
 
 # Load environment variables from .env file
 dotenv.load_dotenv()
+
+# Add timeout handler for API requests
+class APITimeoutError(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise APITimeoutError("API request timed out")
 
 # Facebook API setup
 app_id = os.getenv('FACEBOOK_APP_ID')
@@ -42,9 +50,28 @@ schema = [
     bigquery.SchemaField("ctr", "FLOAT"),
     bigquery.SchemaField("frequency", "FLOAT"),
     bigquery.SchemaField("unique_ctr", "FLOAT"),
-    bigquery.SchemaField("conversions", "INTEGER"),
-    bigquery.SchemaField("cost_per_conversion", "FLOAT"),
-    bigquery.SchemaField("unique_conversions", "INTEGER"),
+    bigquery.SchemaField("leads", "INTEGER"),
+    bigquery.SchemaField("cost_per_lead", "FLOAT"),
+    bigquery.SchemaField("landing_page_views", "INTEGER"),
+    bigquery.SchemaField("cost_per_landing_page_view", "FLOAT"),
+    bigquery.SchemaField("add_to_cart", "INTEGER"),
+    bigquery.SchemaField("cost_per_add_to_cart", "FLOAT"),
+    bigquery.SchemaField('initiate_checkout', 'INTEGER'),
+    bigquery.SchemaField('cost_per_initiate_checkout', 'FLOAT'),
+    bigquery.SchemaField('add_payment_info', 'INTEGER'),
+    bigquery.SchemaField('cost_per_add_payment_info', 'FLOAT'),
+    bigquery.SchemaField('subscribe', 'INTEGER'),
+    bigquery.SchemaField('cost_per_subscribe', 'FLOAT'),
+    bigquery.SchemaField('complete_registration', 'INTEGER'),
+    bigquery.SchemaField('cost_per_complete_registration', 'FLOAT'),
+    bigquery.SchemaField('purchase', 'INTEGER'),
+    bigquery.SchemaField('cost_per_purchase', 'FLOAT'),
+]
+
+# Priority actions to extract from Facebook API
+action_priority = [
+    'lead', 'landing_page_view', 'add_to_cart', 'initiate_checkout',
+    'add_payment_info', 'subscribe', 'complete_registration', 'purchase'
 ]
 
 # Define the fields we want to fetch
@@ -62,9 +89,8 @@ fields = [
     AdsInsights.Field.ctr,
     AdsInsights.Field.unique_ctr,
     AdsInsights.Field.frequency,
-    AdsInsights.Field.conversions,
-    AdsInsights.Field.cost_per_conversion,
-    AdsInsights.Field.unique_conversions,
+    AdsInsights.Field.actions,
+    AdsInsights.Field.action_values,
 ]
 
 def create_table_if_not_exists():
@@ -109,6 +135,34 @@ def get_existing_dates(last_n_days=10) -> Set[datetime.date]:
         print(f"Error querying existing dates (table might not exist): {e}")
         return set()
 
+def get_existing_dates_in_range(start_date: datetime.date, end_date: datetime.date) -> Set[datetime.date]:
+    """Get all existing dates in a specific date range"""
+    query = f"""
+    SELECT DISTINCT date
+    FROM `{dataset_id}.{table_id}`
+    WHERE date >= '{start_date}' AND date <= '{end_date}'
+    ORDER BY date
+    """
+    
+    try:
+        results = client.query(query)
+        existing_dates = {row.date for row in results}
+        total_possible_days = (end_date - start_date).days + 1
+        print(f"Found {len(existing_dates)} existing dates in range {start_date} to {end_date}")
+        print(f"Coverage: {len(existing_dates)}/{total_possible_days} days ({len(existing_dates)/total_possible_days*100:.1f}%)")
+        
+        if existing_dates:
+            min_date = min(existing_dates)
+            max_date = max(existing_dates)
+            print(f"Existing data range: {min_date} to {max_date}")
+        else:
+            print("No existing data found in this range")
+            
+        return existing_dates
+    except Exception as e:
+        print(f"Error querying existing dates in range (table might not exist): {e}")
+        return set()
+
 def get_latest_date_in_bq() -> datetime.date:
     """Get the most recent date in BigQuery table"""
     query = f"""
@@ -125,6 +179,60 @@ def get_latest_date_in_bq() -> datetime.date:
     except Exception as e:
         print(f"Error getting latest date: {e}")
         return None
+
+def get_missing_date_ranges_for_backfill(start_date: datetime.date, end_date: datetime.date, 
+                                       existing_dates: Set[datetime.date]) -> List[tuple]:
+    """
+    Simple backfill logic: find ALL missing dates in the requested range
+    """
+    print(f"\n=== Backfill Date Range Analysis ===")
+    print(f"Requested range: {start_date} to {end_date}")
+    
+    # Generate all dates in the range
+    all_dates = set()
+    current = start_date
+    while current <= end_date:
+        all_dates.add(current)
+        current += timedelta(days=1)
+    
+    # Find missing dates
+    missing_dates = all_dates - existing_dates
+    
+    if not missing_dates:
+        print("✅ No missing dates found!")
+        return []
+    
+    # Convert to sorted list
+    missing_dates_sorted = sorted(missing_dates)
+    print(f"Found {len(missing_dates)} missing dates out of {len(all_dates)} total")
+    print(f"Missing date range: {missing_dates_sorted[0]} to {missing_dates_sorted[-1]}")
+    
+    # Group consecutive dates into ranges
+    ranges = []
+    if missing_dates_sorted:
+        range_start = missing_dates_sorted[0]
+        range_end = missing_dates_sorted[0]
+        
+        for i in range(1, len(missing_dates_sorted)):
+            current_date = missing_dates_sorted[i]
+            if current_date == range_end + timedelta(days=1):
+                # Consecutive date, extend current range
+                range_end = current_date
+            else:
+                # Gap found, save current range and start new one
+                ranges.append((range_start, range_end))
+                range_start = current_date
+                range_end = current_date
+        
+        # Add the last range
+        ranges.append((range_start, range_end))
+    
+    print(f"Grouped into {len(ranges)} consecutive range(s):")
+    for i, (start, end) in enumerate(ranges, 1):
+        days = (end - start).days + 1
+        print(f"  Range {i}: {start} to {end} ({days} days)")
+    
+    return ranges
 
 def get_date_ranges_to_fetch(start_date: datetime.date, end_date: datetime.date, 
                            existing_dates: Set[datetime.date], 
@@ -250,41 +358,62 @@ def get_date_ranges_to_fetch(start_date: datetime.date, end_date: datetime.date,
 
 def delete_existing_data_for_date_range(start_date: datetime.date, end_date: datetime.date):
     """Delete existing data for a date range to avoid duplicates"""
-    delete_query = f"""
-    DELETE FROM `{dataset_id}.{table_id}`
+    
+    # First check if there's any data in the date range
+    check_query = f"""
+    SELECT COUNT(*) as row_count
+    FROM `{dataset_id}.{table_id}`
     WHERE date >= '{start_date}' AND date <= '{end_date}'
     """
     
     try:
+        # Check if there are any rows to delete
+        check_job = client.query(check_query)
+        result = check_job.result()
+        row_count = next(iter(result)).row_count
+        
+        if row_count == 0:
+            print(f"No existing data found for {start_date} to {end_date}, skipping deletion")
+            return
+        
+        print(f"Found {row_count} existing rows for {start_date} to {end_date}, deleting...")
+        
+        # Delete existing data
+        delete_query = f"""
+        DELETE FROM `{dataset_id}.{table_id}`
+        WHERE date >= '{start_date}' AND date <= '{end_date}'
+        """
+        
         job = client.query(delete_query)
         job.result()
         print(f"Deleted existing data for {start_date} to {end_date}")
+        
     except Exception as e:
-        print(f"Error deleting existing data: {e}")
+        print(f"Error checking/deleting existing data: {e}")
 
-def get_conversion_value(conversions_data, action_type):
+def get_action_value(actions_data, action_type):
     """
-    Extract conversion value for specific action type from conversions list
+    Extract action value for specific action type from actions list
     """
-    if not conversions_data or not isinstance(conversions_data, list):
+    if not actions_data or not isinstance(actions_data, list):
         return 0
     
-    for conversion in conversions_data:
-        if isinstance(conversion, dict) and conversion.get('action_type') == action_type:
+    for action in actions_data:
+        if isinstance(action, dict) and action.get('action_type') == action_type:
             try:
-                return int(conversion.get('value', 0))
+                return int(action.get('value', 0))
             except (ValueError, TypeError):
                 return 0
     return 0
 
-def get_cost_per_conversion_value(cost_data, action_type):
+def get_action_cost_value(action_values_data, action_type):
     """
-    Extract cost per conversion value for specific action type
+    Extract cost per action value for specific action type
     """
-    if not cost_data or not isinstance(cost_data, list):
+    if not action_values_data or not isinstance(action_values_data, list):
         return 0.0
     
-    for cost in cost_data:
+    for cost in action_values_data:
         if isinstance(cost, dict) and cost.get('action_type') == action_type:
             try:
                 return float(cost.get('value', 0))
@@ -294,6 +423,25 @@ def get_cost_per_conversion_value(cost_data, action_type):
 
 def fetch_and_load_data(start_date: datetime.date, end_date: datetime.date, delete_existing: bool = True):
     """Fetch data from Facebook API and load to BigQuery"""
+    
+    # Check request size - if more than 30 days, split into chunks
+    days_diff = (end_date - start_date).days + 1
+    if days_diff > 30:
+        print(f"⚠️  Request for {days_diff} days is too large, splitting into chunks...")
+        
+        current_start = start_date
+        while current_start <= end_date:
+            chunk_end = min(current_start + timedelta(days=29), end_date)
+            print(f"📅 Processing chunk: {current_start} to {chunk_end}")
+            fetch_and_load_data(current_start, chunk_end, delete_existing)
+            current_start = chunk_end + timedelta(days=1)
+            
+            # Pause between requests
+            if current_start <= end_date:
+                print(f"⏳ Waiting {ETLConfig.RATE_LIMIT_DELAY} seconds between requests...")
+                time.sleep(ETLConfig.RATE_LIMIT_DELAY)
+        return
+    
     params = {
         'time_range': {'since': start_date.strftime('%Y-%m-%d'), 'until': end_date.strftime('%Y-%m-%d')},
         'level': 'ad',
@@ -304,16 +452,48 @@ def fetch_and_load_data(start_date: datetime.date, end_date: datetime.date, dele
         print(f"\n--- Fetching data ---")
         print(f"Date range: {start_date} to {end_date}")
         print(f"Ad account: {ad_account_id}")
+        print(f"Days in request: {days_diff}")
         
         # Delete existing data for this range to avoid duplicates
         if delete_existing:
             delete_existing_data_for_date_range(start_date, end_date)
         
-        insights = account.get_insights(fields=fields, params=params)
+        # Set 2 minute timeout for API request
+        print("🔄 Sending request to Facebook API...")
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(120)  # 2 minute timeout
+        
+        start_time = time.time()
+        try:
+            insights = account.get_insights(fields=fields, params=params)
+            api_time = time.time() - start_time
+            print(f"✅ API responded in {api_time:.2f} seconds")
+        except APITimeoutError:
+            print("⏰ API request exceeded 2 minute timeout!")
+            print("💡 Try reducing the period or check connection")
+            return
+        finally:
+            signal.alarm(0)  # Disable timeout
 
         # Transform data
         rows_to_insert = []
+        total_rows_processed = 0
+        filtered_out_count = 0
+        
         for insight in insights:
+            total_rows_processed += 1
+            # Get actions and action values data
+            actions = insight.get('actions', [])
+            action_values = insight.get('action_values', [])
+            
+            # Base row data
+            spend = float(insight.get('spend', 0))
+            
+            # Filter out rows with spend below threshold
+            if spend < ETLConfig.MIN_SPEND_THRESHOLD:
+                filtered_out_count += 1
+                continue
+            
             row = {
                 'account_name': insight.get('account_name'),
                 'campaign': insight.get('campaign_name'),
@@ -322,20 +502,52 @@ def fetch_and_load_data(start_date: datetime.date, end_date: datetime.date, dele
                 'date': insight.get('date_start'),
                 'impressions': int(insight.get('impressions', 0)),
                 'clicks': int(insight.get('clicks', 0)),
-                'spend': float(insight.get('spend', 0)),
+                'spend': spend,
                 'cpc': float(insight.get('cpc', 0)),
                 'cpm': float(insight.get('cpm', 0)),
                 'ctr': float(insight.get('ctr', 0)),
                 'frequency': float(insight.get('frequency', 0)),
                 'unique_ctr': float(insight.get('unique_ctr', 0)),
-                'conversions': get_conversion_value(insight.get('conversions'), 'schedule_total'),
-                'cost_per_conversion': get_cost_per_conversion_value(insight.get('cost_per_conversion'), 'schedule_total'),
-                'unique_conversions': int(insight.get('unique_conversions', 0)),
             }
+            
+            # Add conversion/action data for each priority action
+            for action_type in action_priority:
+                # Get action count
+                action_count = get_action_value(actions, action_type)
+                
+                # Map action types to schema field names
+                if action_type == 'landing_page_view':
+                    count_field = 'landing_page_views'
+                    cost_field = 'cost_per_landing_page_view'
+                elif action_type == 'lead':
+                    count_field = 'leads'
+                    cost_field = 'cost_per_lead'
+                else:
+                    count_field = action_type
+                    cost_field = f'cost_per_{action_type}'
+                
+                row[count_field] = action_count
+                
+                # Get cost per action (if action count > 0)
+                if action_count > 0:
+                    cost_per_action = get_action_cost_value(action_values, action_type)
+                    if cost_per_action == 0.0 and row['spend'] > 0:
+                        # Fallback: calculate cost per action from spend
+                        cost_per_action = row['spend'] / action_count
+                    row[cost_field] = cost_per_action
+                else:
+                    row[cost_field] = 0.0
+            
             rows_to_insert.append(row)
 
+        # Show filtering statistics
+        print(f"📊 Data filtering results:")
+        print(f"   Total rows from API: {total_rows_processed}")
+        print(f"   Filtered out (spend < ${ETLConfig.MIN_SPEND_THRESHOLD}): {filtered_out_count}")
+        print(f"   Rows to insert: {len(rows_to_insert)}")
+        
         if not rows_to_insert:
-            print("No data returned from Facebook API")
+            print("⚠️  No active campaigns/ads found (all below spend threshold)")
             return
 
         # Insert data into BigQuery

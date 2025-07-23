@@ -6,7 +6,7 @@ class ETLConfig:
     """Configuration settings for the ETL process"""
     
     # BigQuery settings
-    DATASET_ID = 'feettech_crm'
+    DATASET_ID = 'explorer_facebook_ads'
     TABLE_ID = 'facebook_ads'
     
     # Date range settings
@@ -15,8 +15,11 @@ class ETLConfig:
     MONITORING_WINDOW_DAYS = 10 # Only monitor last N dates in BigQuery for efficiency
     
     # API and processing settings
-    MAX_CHUNK_DAYS = 30         # Maximum days per Facebook API request
-    RATE_LIMIT_DELAY = 30        # Seconds between API calls
+    MAX_CHUNK_DAYS = 7         # Maximum days per Facebook API request
+    RATE_LIMIT_DELAY = 30       # Seconds between API calls
+    
+    # Filtering settings
+    MIN_SPEND_THRESHOLD = 0.01  # Minimum spend ($0.01) to include campaign/ad in results
     
     # Facebook API settings
     API_VERSION = 'v17.0'

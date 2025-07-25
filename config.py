@@ -6,7 +6,7 @@ class ETLConfig:
     """Configuration settings for the ETL process"""
     
     # BigQuery settings
-    DATASET_ID = 'explorer_facebook_ads'
+    DATASET_ID = 'feettech_crm'
     TABLE_ID = 'facebook_ads'
     
     # Date range settings
